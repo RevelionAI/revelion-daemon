@@ -102,12 +102,15 @@ if ($Token -and $dockerAvailable) {
 } elseif ($Token) {
     Write-Ok "Installation complete!"
     Write-Host ""
-    Write-Info "Start Docker Desktop, then run:"
+    Write-Info "Start Docker Desktop, then run in a new terminal:"
     Write-Host "  revelion start" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Info "Or run it now with:"
+    Write-Host "  & '$destPath' start" -ForegroundColor DarkGray
 } else {
     Write-Ok "Installation complete!"
     Write-Host ""
-    Write-Info "Authenticate with your API token (find it at app.revelion.ai/agents):"
+    Write-Info "Open a new terminal, then authenticate with your API token:"
     Write-Host "  revelion auth YOUR_API_TOKEN" -ForegroundColor DarkGray
     Write-Host ""
     Write-Info "Then start the daemon:"
