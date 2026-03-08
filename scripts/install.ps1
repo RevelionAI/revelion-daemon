@@ -1,13 +1,10 @@
 # Revelion Daemon Installer for Windows
-# Usage: irm https://get.revelion.ai/windows | iex
-# Or with token: $env:REVELION_TOKEN='your-token'; irm https://get.revelion.ai/windows | iex
-
-param(
-    [string]$Token = $env:REVELION_TOKEN
-)
+# Usage (in PowerShell): irm https://raw.githubusercontent.com/RevelionAI/revelion-daemon/main/scripts/install.ps1 | iex
+# With token: $env:REVELION_TOKEN='your-token'; irm https://raw.githubusercontent.com/RevelionAI/revelion-daemon/main/scripts/install.ps1 | iex
 
 $ErrorActionPreference = 'Stop'
 
+$Token = $env:REVELION_TOKEN
 $Repo = "RevelionAI/revelion-daemon"
 $InstallDir = "$env:LOCALAPPDATA\Revelion"
 $BinaryName = "revelion.exe"
