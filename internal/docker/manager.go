@@ -27,7 +27,7 @@ import (
 const (
 	ContainerToolServerPort = "48081"
 	ContainerCaidoPort      = "48080"
-	HealthCheckTimeout      = 90 * time.Second
+	HealthCheckTimeout      = 180 * time.Second
 	HealthCheckInterval     = 2 * time.Second
 	ExecHTTPTimeout         = 150 * time.Second // 120s tool timeout + 30s buffer
 	ExecConnectTimeout      = 10 * time.Second
@@ -171,6 +171,7 @@ func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string,
 		env = append(env,
 			"REVELION_VPN_CONFIG="+vpn.Config,
 			"REVELION_VPN_PROVIDER="+vpn.Provider,
+			"HOME=/home/pentester", // root runs entrypoint but poetry needs pentester's home
 		)
 		if vpn.Username != "" {
 			env = append(env, "REVELION_VPN_USERNAME="+vpn.Username)
@@ -208,15 +209,16 @@ func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string,
 		ExtraHosts: []string{"host.docker.internal:host-gateway"},
 	}
 
-	// VPN needs /dev/net/tun device and tmpfs for credentials
+	// VPN needs /dev/net/tun device, root user (for openvpn), and tmpfs for credentials
 	if vpn != nil {
+		containerConfig.User = "root"
 		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
 			PathOnHost:        "/dev/net/tun",
 			PathInContainer:   "/dev/net/tun",
 			CgroupPermissions: "rwm",
 		})
 		hostConfig.Tmpfs = map[string]string{
-			"/tmp/vpn": "size=10m,mode=0700",
+			"/tmp/vpn": "size=10m,mode=0777",
 		}
 	}
 
@@ -246,6 +248,13 @@ func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string,
 	// Wait for tool_server to be healthy
 	if err := m.waitForToolServer(hostPort, token); err != nil {
 		log.Printf("WARNING: tool_server health check failed: %v", err)
+		// Dump container logs for debugging
+		logReader, logErr := m.cli.ContainerLogs(ctx, resp.ID, container.LogsOptions{ShowStdout: true, ShowStderr: true, Tail: "50"})
+		if logErr == nil {
+			logBytes, _ := io.ReadAll(logReader)
+			logReader.Close()
+			log.Printf("Container logs:\n%s", string(logBytes))
+		}
 	}
 
 	info := &ContainerInfo{
