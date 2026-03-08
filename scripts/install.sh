@@ -7,15 +7,18 @@
 
 set -e
 
-REPO="RevelionAI/revelion-daemon"
+REPO="RevelionAI/RevelionV2"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="revelion"
 CONFIG_DIR="$HOME/.revelion"
 
 # Colors
 RED='\033[0;31m'
+BRED='\033[1;31m'
+DRED='\033[0;31m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
+WHITE='\033[1;37m'
 DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
@@ -151,15 +154,18 @@ check_docker() {
 # Main
 main() {
   echo ""
-  printf "${BOLD}${CYAN}"
-  echo "  ____                 _ _             "
-  echo " |  _ \ _____   _____| (_) ___  _ __  "
-  echo " | |_) / _ \ \ / / _ \ | |/ _ \| '_ \ "
-  echo " |  _ <  __/\ V /  __/ | | (_) | | | |"
-  echo " |_| \_\___| \_/ \___|_|_|\___/|_| |_|"
-  printf "${NC}"
-  echo ""
-  info "Daemon Installer"
+  printf "${DRED}    ╔══════════════════════════════════════════════════════════════╗${NC}\n"
+  printf "${DRED}    ║${NC}                                                              ${DRED}║${NC}\n"
+  printf "${DRED}    ║${NC}${BRED}   ██████╗ ███████╗██╗   ██╗███████╗██╗     ██╗ ██████╗ ███╗  ${DRED}║${NC}\n"
+  printf "${DRED}    ║${NC}${BRED}   ██╔══██╗██╔════╝██║   ██║██╔════╝██║     ██║██╔═══██╗████╗ ${DRED}║${NC}\n"
+  printf "${DRED}    ║${NC}${BRED}   ██████╔╝█████╗  ██║   ██║█████╗  ██║     ██║██║   ██║██╔██╗${DRED}║${NC}\n"
+  printf "${DRED}    ║${NC}${BRED}   ██╔══██╗██╔══╝  ╚██╗ ██╔╝██╔══╝  ██║     ██║██║   ██║██║╚═╝${DRED}║${NC}\n"
+  printf "${DRED}    ║${NC}${BRED}   ██║  ██║███████╗ ╚████╔╝ ███████╗███████╗██║╚██████╔╝██║   ${DRED}║${NC}\n"
+  printf "${DRED}    ║${NC}${BRED}   ╚═╝  ╚═╝╚══════╝  ╚═══╝  ╚══════╝╚══════╝╚═╝ ╚═════╝ ╚═╝   ${DRED}║${NC}\n"
+  printf "${DRED}    ║${NC}                                                              ${DRED}║${NC}\n"
+  printf "${DRED}    ║          ░▒▓${NC}${WHITE} D A E M O N   I N S T A L L E R ${NC}${DRED}▓▒░                 ║${NC}\n"
+  printf "${DRED}    ║${NC}                                                              ${DRED}║${NC}\n"
+  printf "${DRED}    ╚══════════════════════════════════════════════════════════════╝${NC}\n"
   echo ""
 
   detect_platform

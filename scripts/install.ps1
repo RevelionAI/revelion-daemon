@@ -16,13 +16,18 @@ function Write-Err($msg) { Write-Host "[revelion] " -ForegroundColor Red -NoNewl
 
 # Banner
 Write-Host ""
-Write-Host "  ____                 _ _             " -ForegroundColor Cyan
-Write-Host " |  _ \ _____   _____| (_) ___  _ __  " -ForegroundColor Cyan
-Write-Host " | |_) / _ \ \ / / _ \ | |/ _ \| '_ \ " -ForegroundColor Cyan
-Write-Host " |  _ <  __/\ V /  __/ | | (_) | | | |" -ForegroundColor Cyan
-Write-Host " |_| \_\___| \_/ \___|_|_|\___/|_| |_|" -ForegroundColor Cyan
-Write-Host ""
-Write-Info "Daemon Installer for Windows"
+Write-Host "    ╔══════════════════════════════════════════════════════════════╗" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "                                                              " -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "   ██████╗ ███████╗██╗   ██╗███████╗██╗     ██╗ ██████╗ ███╗  " -ForegroundColor Red -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "   ██╔══██╗██╔════╝██║   ██║██╔════╝██║     ██║██╔═══██╗████╗ " -ForegroundColor Red -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "   ██████╔╝█████╗  ██║   ██║█████╗  ██║     ██║██║   ██║██╔██╗" -ForegroundColor Red -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "   ██╔══██╗██╔══╝  ╚██╗ ██╔╝██╔══╝  ██║     ██║██║   ██║██║╚═╝" -ForegroundColor Red -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "   ██║  ██║███████╗ ╚████╔╝ ███████╗███████╗██║╚██████╔╝██║   " -ForegroundColor Red -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "   ╚═╝  ╚═╝╚══════╝  ╚═══╝  ╚══════╝╚══════╝╚═╝ ╚═════╝ ╚═╝   " -ForegroundColor Red -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "                                                              " -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "          ░▒▓" -ForegroundColor DarkRed -NoNewline; Write-Host " D A E M O N   I N S T A L L E R " -ForegroundColor White -NoNewline; Write-Host "▓▒░" -ForegroundColor DarkRed -NoNewline; Write-Host "                 " -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ║" -ForegroundColor DarkRed -NoNewline; Write-Host "                                                              " -NoNewline; Write-Host "║" -ForegroundColor DarkRed
+Write-Host "    ╚══════════════════════════════════════════════════════════════╝" -ForegroundColor DarkRed
 Write-Host ""
 
 # Get latest daemon release
