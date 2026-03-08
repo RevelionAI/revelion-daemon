@@ -45,7 +45,7 @@ const (
 
 	// Read deadline — extended on every received message. If no message
 	// (including pong frames) arrives within this window, we reconnect.
-	readDeadline = 90 * time.Second
+	readDeadline = 180 * time.Second
 
 	// Daemon-side keepalive interval. Sends a ping frame every 15s to keep
 	// Fly.io proxy (and any other intermediate proxies) from dropping the
@@ -94,14 +94,25 @@ type Message struct {
 	Timeout      int             `json:"timeout,omitempty"`
 	Image        string          `json:"image,omitempty"`
 	Capabilities []string        `json:"capabilities,omitempty"`
+	// VPN config (passed in create_container)
+	VPNConfig *VPNConfig `json:"vpn_config,omitempty"`
 	// Response fields
-	Result         string `json:"result,omitempty"`
+	Result string `json:"result,omitempty"`
 	Error          string `json:"error,omitempty"`
 	ExitCode       *int   `json:"exit_code,omitempty"`
 	Data           string `json:"data,omitempty"`
 	ContainerID    string `json:"container_id,omitempty"`
 	ToolServerPort int    `json:"tool_server_port,omitempty"`
 	DurationMs     int    `json:"duration_ms,omitempty"`
+}
+
+// VPNConfig holds VPN tunnel configuration for sandbox containers.
+type VPNConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Provider string `json:"provider"`    // "openvpn" or "wireguard"
+	Config   string `json:"config_data"` // base64-encoded .ovpn or .conf
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 // ticketResponse is the response from POST /api/daemons/auth
@@ -185,6 +196,7 @@ func (c *Client) sendMsgSync(v interface{}) {
 
 // writePump is the sole goroutine that writes to the WebSocket.
 // It drains the priority pong channel first, then the normal send channel.
+// Sends a keepalive ping every 15s regardless of data traffic.
 // Exits when done is closed or a write fails (triggering reconnect).
 func (c *Client) writePump(conn *websocket.Conn, stopped chan struct{}) {
 	ticker := time.NewTicker(keepaliveInterval)
@@ -193,8 +205,18 @@ func (c *Client) writePump(conn *websocket.Conn, stopped chan struct{}) {
 		close(stopped)
 	}()
 
+	// sendPing sends a WebSocket ping frame. Returns error if connection is dead.
+	sendPing := func() error {
+		conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+		if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			log.Printf("Write pump: keepalive ping failed: %v", err)
+			return err
+		}
+		return nil
+	}
+
 	for {
-		// Priority: always check pong first
+		// Priority 1: always drain pong channel first (non-blocking)
 		select {
 		case data := <-c.pongCh:
 			if err := c.writeRaw(conn, data); err != nil {
@@ -204,6 +226,16 @@ func (c *Client) writePump(conn *websocket.Conn, stopped chan struct{}) {
 		default:
 		}
 
+		// Priority 2: check if ping is due (non-blocking)
+		select {
+		case <-ticker.C:
+			if err := sendPing(); err != nil {
+				return
+			}
+		default:
+		}
+
+		// Now wait for data, pong, ping, or shutdown
 		select {
 		case data := <-c.pongCh:
 			if err := c.writeRaw(conn, data); err != nil {
@@ -215,11 +247,31 @@ func (c *Client) writePump(conn *websocket.Conn, stopped chan struct{}) {
 				log.Printf("Write pump: write failed: %v", err)
 				return
 			}
+			// After writing data, drain up to 16 more queued messages
+			// but check for pending pings between each batch
+		drain:
+			for i := 0; i < 16; i++ {
+				// Check ping between batch writes
+				select {
+				case <-ticker.C:
+					if err := sendPing(); err != nil {
+						return
+					}
+				default:
+				}
+				// Try to drain another message (non-blocking)
+				select {
+				case data := <-c.sendCh:
+					if err := c.writeRaw(conn, data); err != nil {
+						log.Printf("Write pump: write failed: %v", err)
+						return
+					}
+				default:
+					break drain
+				}
+			}
 		case <-ticker.C:
-			// Daemon-side keepalive: send WebSocket ping frame
-			conn.SetWriteDeadline(time.Now().Add(writeDeadline))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("Write pump: keepalive ping failed: %v", err)
+			if err := sendPing(); err != nil {
 				return
 			}
 		case <-c.done:
@@ -248,6 +300,13 @@ func (c *Client) readPump(conn *websocket.Conn) {
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(readDeadline))
 		return nil
+	})
+
+	// Also extend read deadline on ping frames from the brain
+	// (gorilla default PingHandler sends pong via WriteControl which is goroutine-safe)
+	conn.SetPingHandler(func(appData string) error {
+		conn.SetReadDeadline(time.Now().Add(readDeadline))
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(writeDeadline))
 	})
 
 	for {
@@ -473,7 +532,7 @@ func (c *Client) handleExec(msg Message) {
 
 	// Output callback: streams chunks to brain, keeping WebSocket alive
 	onOutput := func(chunk string) {
-		c.sendMsg(Message{Type: "output", ID: msg.ID, AgentID: msg.AgentID, Data: chunk})
+		c.sendMsg(Message{Type: "output", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Data: chunk})
 	}
 
 	go func() {
@@ -543,7 +602,18 @@ func (c *Client) handleCreateContainer(msg Message) {
 		imgName = c.cfg.SandboxImage
 	}
 
-	containerID, port, err := c.docker.CreateContainer(msg.ScanID, imgName, msg.Capabilities)
+	// Convert WS VPNConfig to Docker VPNConfig
+	var vpn *dockermgr.VPNConfig
+	if msg.VPNConfig != nil && msg.VPNConfig.Enabled {
+		vpn = &dockermgr.VPNConfig{
+			Provider: msg.VPNConfig.Provider,
+			Config:   msg.VPNConfig.Config,
+			Username: msg.VPNConfig.Username,
+			Password: msg.VPNConfig.Password,
+		}
+	}
+
+	containerID, port, err := c.docker.CreateContainer(msg.ScanID, imgName, msg.Capabilities, vpn)
 	if err != nil {
 		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: err.Error()})
 		return

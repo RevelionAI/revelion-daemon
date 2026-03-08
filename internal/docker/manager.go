@@ -50,6 +50,14 @@ type ToolResult struct {
 	Error  *string     `json:"error"`
 }
 
+// VPNConfig holds VPN tunnel configuration for sandbox containers.
+type VPNConfig struct {
+	Provider string // "openvpn" or "wireguard"
+	Config   string // base64-encoded config file
+	Username string // optional auth username
+	Password string // optional auth password
+}
+
 // Manager handles Docker container lifecycle.
 type Manager struct {
 	mu         sync.RWMutex
@@ -85,7 +93,7 @@ func generateToken() string {
 }
 
 // CreateContainer creates a sandbox container for scan execution.
-func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string) (string, int, error) {
+func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string, vpn *VPNConfig) (string, int, error) {
 	if m.cli == nil {
 		return "", 0, fmt.Errorf("docker not available")
 	}
@@ -150,16 +158,35 @@ func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string)
 		nat.Port(ContainerCaidoPort + "/tcp"):      struct{}{},
 	}
 
+	env := []string{
+		"PYTHONUNBUFFERED=1",
+		"TOOL_SERVER_PORT=" + ContainerToolServerPort,
+		"TOOL_SERVER_TOKEN=" + token,
+		"REVELION_SANDBOX_EXECUTION_TIMEOUT=120",
+		"HOST_GATEWAY=host.docker.internal",
+	}
+
+	// VPN configuration — inject env vars for setup-vpn.sh
+	if vpn != nil {
+		env = append(env,
+			"REVELION_VPN_CONFIG="+vpn.Config,
+			"REVELION_VPN_PROVIDER="+vpn.Provider,
+		)
+		if vpn.Username != "" {
+			env = append(env, "REVELION_VPN_USERNAME="+vpn.Username)
+		}
+		if vpn.Password != "" {
+			env = append(env, "REVELION_VPN_PASSWORD="+vpn.Password)
+		}
+		// Add SYS_ADMIN for tun/tap device creation
+		caps = append(caps, "SYS_ADMIN")
+		log.Printf("VPN enabled for scan %s (provider: %s)", scanID, vpn.Provider)
+	}
+
 	containerConfig := &container.Config{
-		Image:    imgName,
-		Hostname: containerName,
-		Env: []string{
-			"PYTHONUNBUFFERED=1",
-			"TOOL_SERVER_PORT=" + ContainerToolServerPort,
-			"TOOL_SERVER_TOKEN=" + token,
-			"REVELION_SANDBOX_EXECUTION_TIMEOUT=120",
-			"HOST_GATEWAY=host.docker.internal",
-		},
+		Image:        imgName,
+		Hostname:     containerName,
+		Env:          env,
 		ExposedPorts: exposedPorts,
 		Cmd:          []string{"sleep", "infinity"},
 		Labels: map[string]string{
@@ -179,6 +206,18 @@ func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string)
 		},
 		CapAdd:     caps,
 		ExtraHosts: []string{"host.docker.internal:host-gateway"},
+	}
+
+	// VPN needs /dev/net/tun device and tmpfs for credentials
+	if vpn != nil {
+		hostConfig.Devices = append(hostConfig.Devices, container.DeviceMapping{
+			PathOnHost:        "/dev/net/tun",
+			PathInContainer:   "/dev/net/tun",
+			CgroupPermissions: "rwm",
+		})
+		hostConfig.Tmpfs = map[string]string{
+			"/tmp/vpn": "size=10m,mode=0700",
+		}
 	}
 
 	// Create container

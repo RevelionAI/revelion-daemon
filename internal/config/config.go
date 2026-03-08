@@ -19,7 +19,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		BrainURL:     "wss://revelion-brain.fly.dev",
-		SandboxImage: "ghcr.io/revelionai/revelion-sandbox:0.1.0",
+		SandboxImage: "ghcr.io/revelionai/revelion-sandbox:0.3.0",
 	}
 }
 
