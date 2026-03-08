@@ -79,7 +79,7 @@ if ($Token) {
     } | ConvertTo-Json
 
     $configPath = Join-Path $ConfigDir "config.json"
-    Set-Content -Path $configPath -Value $config -Encoding UTF8
+    [System.IO.File]::WriteAllText($configPath, $config)
     Write-Ok "Configured with API token"
 }
 
