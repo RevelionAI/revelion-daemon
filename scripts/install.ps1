@@ -85,6 +85,13 @@ if ($Token) {
 
     $configPath = Join-Path $ConfigDir "config.json"
     [System.IO.File]::WriteAllText($configPath, $config)
+
+    # Restrict config file to current user only
+    try {
+        icacls $configPath /inheritance:r /grant:r "${env:USERNAME}:(R,W)" 2>$null | Out-Null
+        icacls $ConfigDir /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" 2>$null | Out-Null
+    } catch {}
+
     Write-Ok "Configured with API token"
 }
 

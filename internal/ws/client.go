@@ -391,8 +391,11 @@ func (c *Client) connect() (*websocket.Conn, error) {
 		return nil, fmt.Errorf("ticket exchange: %w", err)
 	}
 
-	// Step 2: Connect WebSocket with ticket
-	wsURL := c.cfg.BrainURL + "/ws/daemon?ticket=" + ticket
+	// Step 2: Connect WebSocket with ticket in Authorization header
+	wsURL := c.cfg.BrainURL + "/ws/daemon"
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+ticket)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -402,7 +405,7 @@ func (c *Client) connect() (*websocket.Conn, error) {
 		}).DialContext,
 	}
 
-	conn, _, err := dialer.Dial(wsURL, nil)
+	conn, _, err := dialer.Dial(wsURL, headers)
 	if err != nil {
 		return nil, fmt.Errorf("websocket dial: %w", err)
 	}
