@@ -7,7 +7,7 @@
 
 set -e
 
-REPO="RevelionAI/RevelionV2"
+REPO="RevelionAI/revelion-daemon"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="revelion"
 CONFIG_DIR="$HOME/.revelion"
