@@ -80,7 +80,7 @@ if ($Token) {
     $config = @{
         api_token = $Token
         brain_url = "wss://revelion-brain.fly.dev"
-        sandbox_image = "ghcr.io/revelionai/revelion-sandbox:0.3.0"
+        sandbox_image = "ghcr.io/revelionai/revelion-sandbox:0.5.0"
     } | ConvertTo-Json
 
     $configPath = Join-Path $ConfigDir "config.json"

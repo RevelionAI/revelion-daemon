@@ -122,7 +122,7 @@ configure() {
 {
   "api_token": "${API_TOKEN}",
   "brain_url": "wss://revelion-brain.fly.dev",
-  "sandbox_image": "ghcr.io/revelionai/revelion-sandbox:0.3.0"
+  "sandbox_image": "ghcr.io/revelionai/revelion-sandbox:0.5.0"
 }
 EOF
   chmod 600 "${CONFIG_DIR}/config.json"
