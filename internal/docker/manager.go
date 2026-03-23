@@ -86,6 +86,108 @@ func NewManager() *Manager {
 	}
 }
 
+// IsAvailable pings the Docker daemon with a 3-second timeout.
+// Returns true if Docker is reachable.
+func (m *Manager) IsAvailable() bool {
+	if m.cli == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := m.cli.Ping(ctx)
+	return err == nil
+}
+
+// IsImagePresent checks whether the given image exists locally.
+func (m *Manager) IsImagePresent(imgName string) bool {
+	if m.cli == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _, err := m.cli.ImageInspectWithRaw(ctx, imgName)
+	return err == nil
+}
+
+// PullImage pulls the given image and reports download progress (0-100) via progressCb.
+func (m *Manager) PullImage(imgName string, progressCb func(int)) error {
+	if m.cli == nil {
+		return fmt.Errorf("docker not available")
+	}
+
+	ctx := context.Background()
+	reader, err := m.cli.ImagePull(ctx, imgName, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("pull image: %w", err)
+	}
+	defer reader.Close()
+
+	type progressDetail struct {
+		Current int64 `json:"current"`
+		Total   int64 `json:"total"`
+	}
+	type pullEvent struct {
+		Status         string         `json:"status"`
+		ID             string         `json:"id"`
+		ProgressDetail progressDetail `json:"progressDetail"`
+	}
+
+	// Track per-layer progress
+	type layerProgress struct {
+		current int64
+		total   int64
+	}
+	layers := make(map[string]*layerProgress)
+
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		var event pullEvent
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			continue
+		}
+
+		if event.ID != "" && event.ProgressDetail.Total > 0 {
+			lp, ok := layers[event.ID]
+			if !ok {
+				lp = &layerProgress{}
+				layers[event.ID] = lp
+			}
+			lp.current = event.ProgressDetail.Current
+			lp.total = event.ProgressDetail.Total
+		}
+
+		// Calculate overall progress
+		if progressCb != nil && len(layers) > 0 {
+			var totalBytes, currentBytes int64
+			for _, lp := range layers {
+				totalBytes += lp.total
+				currentBytes += lp.current
+			}
+			if totalBytes > 0 {
+				pct := int(currentBytes * 100 / totalBytes)
+				if pct > 100 {
+					pct = 100
+				}
+				progressCb(pct)
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read pull stream: %w", err)
+	}
+
+	// Signal completion
+	if progressCb != nil {
+		progressCb(100)
+	}
+
+	log.Printf("Image %s pulled successfully", imgName)
+	return nil
+}
+
 func generateToken() string {
 	b := make([]byte, 32)
 	rand.Read(b)

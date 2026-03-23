@@ -25,32 +25,52 @@ const (
 
 // PongMessage matches the daemon->brain pong format from build plan Section 2.3.2.
 type PongMessage struct {
-	Type       string  `json:"type"`
-	Containers int     `json:"containers"`
-	CPUPct     float64 `json:"cpu_pct"`
-	MemoryMB   int     `json:"memory_mb"`
-	DiskFreeGB float64 `json:"disk_free_gb"`
-	Version    string  `json:"version"`
-	OS         string  `json:"os"`
-	Arch       string  `json:"arch"`
+	Type              string  `json:"type"`
+	Containers        int     `json:"containers"`
+	CPUPct            float64 `json:"cpu_pct"`
+	MemoryMB          int     `json:"memory_mb"`
+	DiskFreeGB        float64 `json:"disk_free_gb"`
+	Version           string  `json:"version"`
+	OS                string  `json:"os"`
+	Arch              string  `json:"arch"`
+	DockerStatus      string  `json:"docker_status"`
+	ImageStatus       string  `json:"image_status"`
+	ImagePullProgress int     `json:"image_pull_progress"`
 }
 
 // Reporter collects system stats for pong responses.
 type Reporter struct {
-	docker *dockermgr.Manager
+	docker     *dockermgr.Manager
+	sandboxImg string
+	version    string
 
-	mu         sync.RWMutex
-	cpuPct     float64
-	memoryMB   int
-	diskFreeGB float64
+	mu           sync.RWMutex
+	cpuPct       float64
+	memoryMB     int
+	diskFreeGB   float64
+	dockerStatus string
+	imageStatus  string
+	imagePullPct int
 
-	stopCh chan struct{}
+	onNeedsPull func() // called when Docker is running but image is missing
+	stopCh      chan struct{}
 }
 
-func NewReporter(docker *dockermgr.Manager) *Reporter {
+// SetOnNeedsPull registers a callback for when Docker is running but image is missing.
+func (r *Reporter) SetOnNeedsPull(cb func()) {
+	r.mu.Lock()
+	r.onNeedsPull = cb
+	r.mu.Unlock()
+}
+
+func NewReporter(docker *dockermgr.Manager, sandboxImage string, version string) *Reporter {
 	r := &Reporter{
-		docker: docker,
-		stopCh: make(chan struct{}),
+		docker:       docker,
+		sandboxImg:   sandboxImage,
+		version:      version,
+		dockerStatus: "unknown",
+		imageStatus:  "unknown",
+		stopCh:       make(chan struct{}),
 	}
 	// Take an initial non-blocking sample
 	r.sampleOnce()
@@ -113,11 +133,38 @@ func (r *Reporter) sampleOnce() {
 		diskFreeGB = float64(usage.Free) / (1024 * 1024 * 1024)
 	}
 
+	// Docker status
+	dockerStatus := "stopped"
+	imageStatus := ""
+	if r.docker.IsAvailable() {
+		dockerStatus = "running"
+		if r.docker.IsImagePresent(r.sandboxImg) {
+			imageStatus = "ready"
+		} else {
+			imageStatus = "missing"
+		}
+	}
+
 	r.mu.Lock()
 	r.cpuPct = cpuPct
 	r.memoryMB = memoryMB
 	r.diskFreeGB = diskFreeGB
+	r.dockerStatus = dockerStatus
+	// Don't overwrite imageStatus if a pull is in progress
+	needsPull := false
+	if r.imageStatus != "pulling" {
+		r.imageStatus = imageStatus
+		// Trigger re-pull if Docker is running but image is missing
+		if dockerStatus == "running" && imageStatus == "missing" && r.onNeedsPull != nil {
+			needsPull = true
+		}
+	}
+	cb := r.onNeedsPull
 	r.mu.Unlock()
+
+	if needsPull && cb != nil {
+		go cb()
+	}
 }
 
 // GetPongCached returns a pong message with cached system stats.
@@ -127,18 +174,32 @@ func (r *Reporter) GetPongCached() PongMessage {
 	cpuPct := r.cpuPct
 	memoryMB := r.memoryMB
 	diskFreeGB := r.diskFreeGB
+	dockerStatus := r.dockerStatus
+	imageStatus := r.imageStatus
+	imagePullPct := r.imagePullPct
 	r.mu.RUnlock()
 
 	return PongMessage{
-		Type:       "pong",
-		Containers: r.docker.ActiveContainers(),
-		CPUPct:     cpuPct,
-		MemoryMB:   memoryMB,
-		DiskFreeGB: diskFreeGB,
-		Version:    "0.2.0",
-		OS:         runtime.GOOS,
-		Arch:       runtime.GOARCH,
+		Type:              "pong",
+		Containers:        r.docker.ActiveContainers(),
+		CPUPct:            cpuPct,
+		MemoryMB:          memoryMB,
+		DiskFreeGB:        diskFreeGB,
+		Version:           r.version,
+		OS:                runtime.GOOS,
+		Arch:              runtime.GOARCH,
+		DockerStatus:      dockerStatus,
+		ImageStatus:       imageStatus,
+		ImagePullProgress: imagePullPct,
 	}
+}
+
+// SetImageStatus updates the image status and pull progress from external callers.
+func (r *Reporter) SetImageStatus(status string, pct int) {
+	r.mu.Lock()
+	r.imageStatus = status
+	r.imagePullPct = pct
+	r.mu.Unlock()
 }
 
 // GetPong is kept for backward compatibility but uses cached stats.

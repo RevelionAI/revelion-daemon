@@ -22,7 +22,7 @@ import (
 )
 
 // Version is set at build time via -ldflags
-var Version = "dev"
+var Version = "0.8.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -106,7 +106,7 @@ func runDaemon() {
 	}
 
 	docker := dockermgr.NewManager()
-	reporter := health.NewReporter(docker)
+	reporter := health.NewReporter(docker, cfg.SandboxImage, Version)
 	client := ws.NewClient(cfg, docker, reporter)
 
 	// Handle shutdown gracefully

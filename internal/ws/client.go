@@ -335,6 +335,7 @@ func (c *Client) readPump(conn *websocket.Conn) {
 // Reconnects with exponential backoff on disconnect.
 func (c *Client) ConnectAndServe() {
 	backoff := 100 * time.Millisecond
+	prePullDone := false
 
 	for {
 		conn, err := c.connect()
@@ -355,6 +356,13 @@ func (c *Client) ConnectAndServe() {
 
 		// Drain any stale messages from previous connection
 		c.drainChannels()
+
+		// Pre-pull sandbox image on first connection + register retry callback
+		if !prePullDone {
+			prePullDone = true
+			c.reporter.SetOnNeedsPull(func() { c.prePullSandboxImage() })
+			go c.prePullSandboxImage()
+		}
 
 		// Start read and write pumps
 		writeStopped := make(chan struct{})
@@ -641,6 +649,43 @@ func (c *Client) handleRegisterAgent(msg Message) {
 		return
 	}
 	log.Printf("Registered agent %s for scan %s", msg.AgentID, msg.ScanID)
+}
+
+// prePullSandboxImage checks Docker availability and pre-pulls the sandbox image if missing.
+func (c *Client) prePullSandboxImage() {
+	if !c.docker.IsAvailable() {
+		log.Println("Docker not available — skipping sandbox image pre-pull")
+		return
+	}
+
+	imgName := c.cfg.SandboxImage
+
+	// Skip if already pulling or ready
+	pong := c.reporter.GetPongCached()
+	if pong.ImageStatus == "pulling" || pong.ImageStatus == "ready" {
+		return
+	}
+
+	if c.docker.IsImagePresent(imgName) {
+		log.Printf("Sandbox image %s already present", imgName)
+		c.reporter.SetImageStatus("ready", 100)
+		return
+	}
+
+	log.Printf("Pre-pulling sandbox image %s...", imgName)
+	c.reporter.SetImageStatus("pulling", 0)
+
+	err := c.docker.PullImage(imgName, func(pct int) {
+		c.reporter.SetImageStatus("pulling", pct)
+	})
+	if err != nil {
+		log.Printf("Failed to pre-pull sandbox image: %v", err)
+		c.reporter.SetImageStatus("missing", 0)
+		return
+	}
+
+	log.Printf("Sandbox image %s pre-pulled successfully", imgName)
+	c.reporter.SetImageStatus("ready", 100)
 }
 
 // Close shuts down the WebSocket client.
