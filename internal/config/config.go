@@ -11,6 +11,13 @@ import (
 	"time"
 )
 
+const CurrentSandboxImage = "ghcr.io/revelionai/revelion-sandbox:0.7.0"
+
+var legacyOfficialSandboxImages = map[string]struct{}{
+	"ghcr.io/revelionai/revelion-sandbox:0.5.0": {},
+	"ghcr.io/revelionai/revelion-sandbox:0.6.0": {},
+}
+
 // Config holds daemon settings persisted to disk.
 type Config struct {
 	APIToken string `json:"api_token"`
@@ -42,7 +49,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		BrainURL:           "wss://revelion-brain.fly.dev",
-		SandboxImage:       "ghcr.io/revelionai/revelion-sandbox:0.7.0",
+		SandboxImage:       CurrentSandboxImage,
 		BurpProxyURL:       "http://127.0.0.1:8080",
 		BurpMCPURL:         "http://127.0.0.1:9876",
 		BurpRESTURL:        "http://127.0.0.1:1337",
@@ -75,13 +82,23 @@ func Load() (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	if cfg.BurpExtensionAddr == "" {
-		cfg.BurpExtensionAddr = DefaultConfig().BurpExtensionAddr
-	}
+	normalizeLoadedConfig(cfg)
 	if cfg.APIToken == "" {
 		return nil, fmt.Errorf("no API token configured")
 	}
 	return cfg, nil
+}
+
+func normalizeLoadedConfig(cfg *Config) {
+	defaults := DefaultConfig()
+	if cfg.SandboxImage == "" {
+		cfg.SandboxImage = defaults.SandboxImage
+	} else if _, ok := legacyOfficialSandboxImages[cfg.SandboxImage]; ok {
+		cfg.SandboxImage = defaults.SandboxImage
+	}
+	if cfg.BurpExtensionAddr == "" {
+		cfg.BurpExtensionAddr = defaults.BurpExtensionAddr
+	}
 }
 
 // Save writes the config to disk.
