@@ -7,3 +7,6 @@ dist/
 *.test
 *.out
 .DS_Store
+auth_resp.json
+*.log
+*.err

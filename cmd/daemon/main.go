@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/revelion/daemon/internal/burp"
 	"github.com/revelion/daemon/internal/config"
 	dockermgr "github.com/revelion/daemon/internal/docker"
 	"github.com/revelion/daemon/internal/health"
@@ -108,6 +109,12 @@ func runDaemon() {
 	docker := dockermgr.NewManager()
 	reporter := health.NewReporter(docker, cfg.SandboxImage, Version)
 	client := ws.NewClient(cfg, docker, reporter)
+	extensionServer := burp.NewExtensionServer(cfg)
+	client.SetExtensionServer(extensionServer)
+	if err := extensionServer.Start(); err != nil {
+		log.Fatalf("Failed to start Burp extension server: %v", err)
+	}
+	log.Printf("Burp extension endpoint: %s", extensionServer.URL())
 
 	// Handle shutdown gracefully
 	sigCh := make(chan os.Signal, 1)
@@ -116,6 +123,7 @@ func runDaemon() {
 	go func() {
 		<-sigCh
 		log.Println("Shutting down daemon...")
+		extensionServer.Close()
 		client.Close()
 		reporter.Stop()
 		docker.CleanupAll()

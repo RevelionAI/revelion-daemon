@@ -14,12 +14,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 )
@@ -195,7 +197,7 @@ func generateToken() string {
 }
 
 // CreateContainer creates a sandbox container for scan execution.
-func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string, vpn *VPNConfig) (string, int, error) {
+func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string, vpn *VPNConfig, proxyProvider string, sandboxProxyURL string, burpCAPath string) (string, int, error) {
 	if m.cli == nil {
 		return "", 0, fmt.Errorf("docker not available")
 	}
@@ -268,6 +270,25 @@ func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string,
 		"HOST_GATEWAY=host.docker.internal",
 	}
 
+	if proxyProvider == "" {
+		proxyProvider = "caido_sandbox"
+	}
+	env = append(env, "REVELION_PROXY_PROVIDER="+proxyProvider)
+	if proxyProvider == "burp_local" && sandboxProxyURL != "" {
+		env = append(env,
+			"HTTP_PROXY="+sandboxProxyURL,
+			"HTTPS_PROXY="+sandboxProxyURL,
+			"ALL_PROXY="+sandboxProxyURL,
+			"http_proxy="+sandboxProxyURL,
+			"https_proxy="+sandboxProxyURL,
+			"all_proxy="+sandboxProxyURL,
+			"NO_PROXY=127.0.0.1,localhost,::1",
+			"no_proxy=127.0.0.1,localhost,::1",
+			"REVELION_DISABLE_CAIDO=1",
+		)
+		log.Printf("Burp local proxy enabled for scan %s via %s", scanID, sandboxProxyURL)
+	}
+
 	// VPN configuration — inject env vars for setup-vpn.sh
 	if vpn != nil {
 		env = append(env,
@@ -309,6 +330,28 @@ func (m *Manager) CreateContainer(scanID, imgName string, capabilities []string,
 		},
 		CapAdd:     caps,
 		ExtraHosts: []string{"host.docker.internal:host-gateway"},
+	}
+
+	if proxyProvider == "burp_local" && strings.TrimSpace(burpCAPath) != "" {
+		if _, err := os.Stat(burpCAPath); err == nil {
+			target := "/app/certs/revelion-burp-ca.pem"
+			hostConfig.Mounts = append(hostConfig.Mounts, mount.Mount{
+				Type:     mount.TypeBind,
+				Source:   burpCAPath,
+				Target:   target,
+				ReadOnly: true,
+			})
+			env = append(env,
+				"REVELION_BURP_CA_BUNDLE="+target,
+				"REQUESTS_CA_BUNDLE="+target,
+				"SSL_CERT_FILE="+target,
+				"NODE_EXTRA_CA_CERTS="+target,
+			)
+			containerConfig.Env = env
+			log.Printf("Burp CA mounted for scan %s at %s", scanID, target)
+		} else {
+			log.Printf("WARNING: Burp CA path configured but not readable for scan %s: %v", scanID, err)
+		}
 	}
 
 	// VPN needs /dev/net/tun device, root user (for openvpn), and tmpfs for credentials

@@ -21,7 +21,9 @@ package ws
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,6 +35,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/revelion/daemon/internal/burp"
 	"github.com/revelion/daemon/internal/config"
 	dockermgr "github.com/revelion/daemon/internal/docker"
 	"github.com/revelion/daemon/internal/health"
@@ -62,9 +65,11 @@ const (
 
 // Client manages the persistent WebSocket connection to the brain.
 type Client struct {
-	cfg      *config.Config
-	docker   *dockermgr.Manager
-	reporter *health.Reporter
+	cfg       *config.Config
+	docker    *dockermgr.Manager
+	reporter  *health.Reporter
+	burp      *burp.Manager
+	extension *burp.ExtensionServer
 
 	// Connection state — only accessed by connect/reconnect goroutine
 	conn   *websocket.Conn
@@ -85,25 +90,36 @@ type Client struct {
 
 // Message is a generic WebSocket message envelope.
 type Message struct {
-	Type         string          `json:"type"`
-	ID           string          `json:"id,omitempty"`
-	ScanID       string          `json:"scan_id,omitempty"`
-	AgentID      string          `json:"agent_id,omitempty"`
-	ToolName     string          `json:"tool_name,omitempty"`
-	Parameters   json.RawMessage `json:"parameters,omitempty"`
-	Timeout      int             `json:"timeout,omitempty"`
-	Image        string          `json:"image,omitempty"`
-	Capabilities []string        `json:"capabilities,omitempty"`
+	Type            string          `json:"type"`
+	ID              string          `json:"id,omitempty"`
+	RequestID       string          `json:"request_id,omitempty"`
+	ScanID          string          `json:"scan_id,omitempty"`
+	AgentID         string          `json:"agent_id,omitempty"`
+	ToolName        string          `json:"tool_name,omitempty"`
+	Parameters      json.RawMessage `json:"parameters,omitempty"`
+	Timeout         int             `json:"timeout,omitempty"`
+	Image           string          `json:"image,omitempty"`
+	Capabilities    []string        `json:"capabilities,omitempty"`
+	ProxyProvider   string          `json:"proxy_provider,omitempty"`
+	SandboxProxyURL string          `json:"sandbox_proxy_url,omitempty"`
+	MissionID       string          `json:"mission_id,omitempty"`
+	BurpToolName    string          `json:"burp_tool_name,omitempty"`
+	BurpRESTAction  string          `json:"burp_rest_action,omitempty"`
+	SnapshotID      string          `json:"snapshot_id,omitempty"`
+	IncludeRules    []string        `json:"include_rules,omitempty"`
+	ExcludeRules    []string        `json:"exclude_rules,omitempty"`
+	Autonomous      bool            `json:"autonomous,omitempty"`
 	// VPN config (passed in create_container)
 	VPNConfig *VPNConfig `json:"vpn_config,omitempty"`
 	// Response fields
-	Result string `json:"result,omitempty"`
+	Result         string `json:"result,omitempty"`
 	Error          string `json:"error,omitempty"`
 	ExitCode       *int   `json:"exit_code,omitempty"`
 	Data           string `json:"data,omitempty"`
 	ContainerID    string `json:"container_id,omitempty"`
 	ToolServerPort int    `json:"tool_server_port,omitempty"`
 	DurationMs     int    `json:"duration_ms,omitempty"`
+	StatusCode     int    `json:"status_code,omitempty"`
 }
 
 // VPNConfig holds VPN tunnel configuration for sandbox containers.
@@ -126,10 +142,25 @@ func NewClient(cfg *config.Config, docker *dockermgr.Manager, reporter *health.R
 		cfg:      cfg,
 		docker:   docker,
 		reporter: reporter,
-		pongCh:   make(chan []byte, 1),
-		sendCh:   make(chan []byte, sendChanSize),
-		done:     make(chan struct{}),
-		running:  make(map[string]chan struct{}),
+		burp: burp.NewManager(burp.Config{
+			ProxyURL:          cfg.BurpProxyURL,
+			MCPURL:            cfg.BurpMCPURL,
+			RESTURL:           cfg.BurpRESTURL,
+			CAPath:            cfg.BurpCAPath,
+			AutonomousMode:    cfg.BurpAutonomousMode,
+			RESTKeyConfigured: strings.TrimSpace(cfg.BurpRESTAPIKey) != "",
+		}),
+		pongCh:  make(chan []byte, 1),
+		sendCh:  make(chan []byte, sendChanSize),
+		done:    make(chan struct{}),
+		running: make(map[string]chan struct{}),
+	}
+}
+
+func (c *Client) SetExtensionServer(extension *burp.ExtensionServer) {
+	c.extension = extension
+	if extension != nil {
+		extension.SetScanIssueHandler(c.handleExtensionScanIssue)
 	}
 }
 
@@ -508,6 +539,61 @@ func (c *Client) handleMessage(msg Message) {
 	case "register_agent":
 		go c.handleRegisterAgent(msg)
 
+	case "burp_health":
+		go c.handleBurpHealth(msg)
+
+	case "burp_acquire_mission":
+		go c.handleBurpAcquireMission(msg)
+
+	case "burp_release_mission":
+		go c.handleBurpReleaseMission(msg)
+
+	case "burp_disconnect":
+		go c.handleBurpDisconnect(msg)
+
+	case "burp_store_rest_key":
+		go c.handleBurpStoreRESTKey(msg)
+
+	case "burp_install_ca":
+		go c.handleBurpInstallCA(msg)
+
+	case "burp_configure_approval_mode":
+		go c.handleBurpConfigureApprovalMode(msg)
+
+	case "burp_mcp_call":
+		go c.handleBurpMCPCall(msg)
+
+	case "burp_rest_call":
+		go c.handleBurpRESTCall(msg)
+
+	case "burp_scope_set":
+		go c.handleBurpScopeSet(msg)
+
+	case "burp_scope_restore":
+		go c.handleBurpScopeRestore(msg)
+
+	case "burp_approval_gates_set":
+		go c.handleBurpApprovalGatesSet(msg)
+
+	case "burp_approval_gates_restore":
+		go c.handleBurpApprovalGatesRestore(msg)
+
+	case "burp_scan_start":
+		go c.handleBurpScanStart(msg)
+
+	case "burp_scan_cancel":
+		go c.handleBurpScanCancel(msg)
+
+	case "burp_pair_initiate_request",
+		"burp_pair_status_request",
+		"burp_pair_cancel_request",
+		"burp_pair_disconnect_request",
+		"burp_state_request",
+		"burp_scope_active_request",
+		"burp_scope_clear_request",
+		"burp_approval_gates_active_request":
+		go c.handleBurpExtensionProxyRequest(msg)
+
 	default:
 		log.Printf("Unknown message type: %s", msg.Type)
 	}
@@ -621,7 +707,7 @@ func (c *Client) handleCreateContainer(msg Message) {
 		}
 	}
 
-	containerID, port, err := c.docker.CreateContainer(msg.ScanID, imgName, msg.Capabilities, vpn)
+	containerID, port, err := c.docker.CreateContainer(msg.ScanID, imgName, msg.Capabilities, vpn, msg.ProxyProvider, msg.SandboxProxyURL, c.cfg.BurpCAPath)
 	if err != nil {
 		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: err.Error()})
 		return
@@ -649,6 +735,534 @@ func (c *Client) handleRegisterAgent(msg Message) {
 		return
 	}
 	log.Printf("Registered agent %s for scan %s", msg.AgentID, msg.ScanID)
+}
+
+func (c *Client) handleBurpHealth(msg Message) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	health := c.burp.Health(ctx)
+	payload, _ := json.Marshal(health)
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: string(payload)})
+}
+
+func (c *Client) handleBurpAcquireMission(msg Message) {
+	missionID := msg.MissionID
+	if missionID == "" {
+		missionID = msg.ScanID
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	health, err := c.burp.AcquireMission(ctx, missionID)
+	payload, _ := json.Marshal(health)
+	if err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: err.Error(), Result: string(payload)})
+		return
+	}
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: string(payload)})
+}
+
+func (c *Client) handleBurpReleaseMission(msg Message) {
+	missionID := msg.MissionID
+	if missionID == "" {
+		missionID = msg.ScanID
+	}
+	if c.extension != nil {
+		c.extension.ClearScanForMission(missionID)
+	}
+	c.burp.ReleaseMission(missionID)
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: `{"released":true}`})
+}
+
+func (c *Client) handleBurpDisconnect(msg Message) {
+	c.burp.Disconnect()
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: `{"disconnected":true}`})
+}
+
+func (c *Client) handleBurpStoreRESTKey(msg Message) {
+	var params struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(msg.Parameters, &params); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "invalid_burp_rest_key_payload"})
+		return
+	}
+	key := strings.TrimSpace(params.Key)
+	if key == "" {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "missing_burp_rest_key"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.burp.VerifyRESTKey(ctx, key); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "burp_rest_key_verification_failed: " + err.Error()})
+		return
+	}
+
+	c.cfg.BurpRESTAPIKey = key
+	if err := config.Save(c.cfg); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "burp_rest_key_save_failed"})
+		return
+	}
+	c.burp.SetRESTKeyConfigured(true)
+
+	log.Printf("AUDIT burp_rest_key_stored via brain at=%s", time.Now().UTC().Format(time.RFC3339))
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: `{"stored":true}`})
+}
+
+func (c *Client) handleBurpInstallCA(msg Message) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	path := strings.TrimSpace(c.cfg.BurpCAPath)
+	if path == "" {
+		path = config.DefaultBurpCAPath()
+	}
+
+	result, err := c.burp.InstallCA(ctx, path)
+	if err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "burp_ca_install_failed: " + err.Error()})
+		return
+	}
+
+	c.cfg.BurpCAPath = result.Path
+	if err := config.Save(c.cfg); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "burp_ca_save_failed"})
+		return
+	}
+
+	payload, _ := json.Marshal(result)
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: string(payload)})
+}
+
+func (c *Client) handleBurpConfigureApprovalMode(msg Message) {
+	var params struct {
+		Autonomous bool `json:"autonomous"`
+	}
+	if len(msg.Parameters) > 0 {
+		if err := json.Unmarshal(msg.Parameters, &params); err != nil {
+			c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "invalid_burp_approval_mode_payload"})
+			return
+		}
+	} else {
+		params.Autonomous = true
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	state, err := c.burp.ConfigureApprovalMode(ctx, params.Autonomous)
+	if err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "burp_approval_mode_failed: " + err.Error()})
+		return
+	}
+
+	c.cfg.BurpAutonomousMode = params.Autonomous
+	if err := config.Save(c.cfg); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "burp_approval_mode_save_failed"})
+		return
+	}
+
+	payload, _ := json.Marshal(state)
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: string(payload)})
+}
+
+func (c *Client) handleBurpMCPCall(msg Message) {
+	missionID := msg.MissionID
+	if missionID == "" {
+		missionID = msg.ScanID
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	result, err := c.burp.CallTool(ctx, missionID, msg.BurpToolName, msg.Parameters)
+	durationMs := int(time.Since(start).Milliseconds())
+	if err != nil {
+		code := err.Error()
+		if errors.Is(err, burp.ErrApprovalPending) {
+			var params map[string]any
+			if len(msg.Parameters) > 0 {
+				_ = json.Unmarshal(msg.Parameters, &params)
+			}
+			if params == nil {
+				params = map[string]any{}
+			}
+			payload, _ := json.Marshal(burp.BuildApprovalPending(msg.BurpToolName, params))
+			c.sendMsgSync(Message{
+				Type:       "completed",
+				ID:         msg.ID,
+				ScanID:     msg.ScanID,
+				AgentID:    msg.AgentID,
+				Result:     string(payload),
+				DurationMs: durationMs,
+			})
+			return
+		}
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: code, DurationMs: durationMs})
+		return
+	}
+	payload, _ := json.Marshal(result)
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Result: string(payload), DurationMs: durationMs})
+}
+
+func (c *Client) handleBurpRESTCall(msg Message) {
+	action := strings.TrimSpace(msg.BurpRESTAction)
+	if action == "" {
+		action = strings.TrimSpace(msg.BurpToolName)
+	}
+	if action == "" {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: "missing_burp_rest_action"})
+		return
+	}
+	key := strings.TrimSpace(c.cfg.BurpRESTAPIKey)
+	if key == "" {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: "burp_rest_key_missing"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	start := time.Now()
+	var (
+		payload any
+		err     error
+	)
+
+	switch action {
+	case "list_scan_configurations":
+		payload, err = c.burp.ListScanConfigurations(ctx, key)
+	case "create_scan":
+		if !c.cfg.BurpRESTFallback {
+			err = fmt.Errorf("burp_rest_fallback_disabled")
+			break
+		}
+		payload, err = c.burp.CreateRESTScan(ctx, key, msg.Parameters)
+	case "poll_scan":
+		if !c.cfg.BurpRESTFallback {
+			err = fmt.Errorf("burp_rest_fallback_disabled")
+			break
+		}
+		var params struct {
+			TaskID      string `json:"task_id"`
+			After       string `json:"after"`
+			IssueEvents int    `json:"issue_events"`
+		}
+		if err = json.Unmarshal(msg.Parameters, &params); err == nil {
+			payload, err = c.burp.PollRESTScan(ctx, key, params.TaskID, params.After, params.IssueEvents)
+		}
+	case "cancel_scan":
+		if !c.cfg.BurpRESTFallback {
+			err = fmt.Errorf("burp_rest_fallback_disabled")
+			break
+		}
+		var params struct {
+			TaskID string `json:"task_id"`
+		}
+		if err = json.Unmarshal(msg.Parameters, &params); err == nil {
+			payload, err = c.burp.CancelRESTScan(ctx, key, params.TaskID)
+		}
+	case "issue_definitions":
+		payload, err = c.burp.GetIssueDefinitions(ctx, key)
+	default:
+		err = fmt.Errorf("unknown_burp_rest_action: %s", action)
+	}
+
+	durationMs := int(time.Since(start).Milliseconds())
+	if err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: err.Error(), DurationMs: durationMs})
+		return
+	}
+
+	switch typed := payload.(type) {
+	case json.RawMessage:
+		c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Result: string(typed), DurationMs: durationMs})
+	case []byte:
+		c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Result: string(typed), DurationMs: durationMs})
+	default:
+		data, marshalErr := json.Marshal(typed)
+		if marshalErr != nil {
+			c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: "burp_rest_result_marshal_failed", DurationMs: durationMs})
+			return
+		}
+		c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Result: string(data), DurationMs: durationMs})
+	}
+}
+
+func (c *Client) handleBurpScopeSet(msg Message) {
+	if c.extension == nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "extension_not_paired"})
+		c.sendMsg(Message{Type: "burp_scope_set_failed", ScanID: msg.ScanID, MissionID: msg.MissionID, Error: "extension_not_paired"})
+		return
+	}
+	missionID := msg.MissionID
+	if missionID == "" {
+		missionID = msg.ScanID
+	}
+	if err := c.extension.SendScopeSet(missionID, msg.SnapshotID, msg.IncludeRules, msg.ExcludeRules); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: err.Error()})
+		c.sendMsg(Message{Type: "burp_scope_set_failed", ScanID: msg.ScanID, MissionID: missionID, Error: err.Error()})
+		return
+	}
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: `{"sent":true}`})
+}
+
+func (c *Client) handleBurpScopeRestore(msg Message) {
+	if c.extension == nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "extension_not_paired"})
+		return
+	}
+	if err := c.extension.SendScopeRestore(msg.SnapshotID); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: err.Error()})
+		return
+	}
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: `{"sent":true}`})
+}
+
+func (c *Client) handleBurpApprovalGatesSet(msg Message) {
+	if c.extension == nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "extension_not_paired"})
+		return
+	}
+	if err := c.extension.SendApprovalGatesSet(msg.SnapshotID, msg.Autonomous); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: err.Error()})
+		return
+	}
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: `{"sent":true}`})
+}
+
+func (c *Client) handleBurpApprovalGatesRestore(msg Message) {
+	if c.extension == nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: "extension_not_paired"})
+		return
+	}
+	if err := c.extension.SendApprovalGatesRestore(msg.SnapshotID); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, Error: err.Error()})
+		return
+	}
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, Result: `{"sent":true}`})
+}
+
+func (c *Client) handleBurpScanStart(msg Message) {
+	if c.extension == nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: "extension_not_paired"})
+		return
+	}
+	var params struct {
+		ScanID            string `json:"scan_id"`
+		ScanTaskID        string `json:"scan_task_id"`
+		MissionID         string `json:"mission_id"`
+		TargetURL         string `json:"target_url"`
+		ConfigurationName string `json:"configuration_name"`
+		AuditConfigLabel  string `json:"audit_config_label"`
+	}
+	if len(msg.Parameters) > 0 {
+		if err := json.Unmarshal(msg.Parameters, &params); err != nil {
+			c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: "invalid_burp_scan_start_payload"})
+			return
+		}
+	}
+	missionID := strings.TrimSpace(params.MissionID)
+	if missionID == "" {
+		missionID = strings.TrimSpace(msg.MissionID)
+	}
+	if missionID == "" {
+		missionID = strings.TrimSpace(msg.ScanID)
+	}
+	scanTaskID := strings.TrimSpace(params.ScanTaskID)
+	if scanTaskID == "" {
+		scanTaskID = strings.TrimSpace(params.ScanID)
+	}
+	if scanTaskID == "" {
+		scanTaskID = missionID
+	}
+	label := strings.TrimSpace(params.AuditConfigLabel)
+	if label == "" {
+		label = strings.TrimSpace(params.ConfigurationName)
+	}
+	if strings.TrimSpace(params.TargetURL) == "" {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: "missing_burp_scan_target_url"})
+		return
+	}
+	if err := c.extension.SendScanStart(missionID, scanTaskID, params.TargetURL, label); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: err.Error()})
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"sent":               true,
+		"scan_id":            scanTaskID,
+		"mission_id":         missionID,
+		"target_url":         params.TargetURL,
+		"audit_config_label": label,
+		"control_surface":    "montoya_extension",
+	})
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Result: string(payload)})
+}
+
+func (c *Client) handleBurpScanCancel(msg Message) {
+	if c.extension == nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: "extension_not_paired"})
+		return
+	}
+	var params struct {
+		ScanID     string `json:"scan_id"`
+		ScanTaskID string `json:"scan_task_id"`
+	}
+	if len(msg.Parameters) > 0 {
+		if err := json.Unmarshal(msg.Parameters, &params); err != nil {
+			c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: "invalid_burp_scan_cancel_payload"})
+			return
+		}
+	}
+	scanTaskID := strings.TrimSpace(params.ScanTaskID)
+	if scanTaskID == "" {
+		scanTaskID = strings.TrimSpace(params.ScanID)
+	}
+	if err := c.extension.SendScanCancel(scanTaskID); err != nil {
+		c.sendMsgSync(Message{Type: "error", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Error: err.Error()})
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{"sent": true, "scan_id": scanTaskID})
+	c.sendMsgSync(Message{Type: "completed", ID: msg.ID, ScanID: msg.ScanID, AgentID: msg.AgentID, Result: string(payload)})
+}
+
+func (c *Client) handleExtensionScanIssue(missionID, scanID string, issue json.RawMessage) {
+	if strings.TrimSpace(missionID) == "" {
+		log.Printf("Dropping Burp scanner issue without mission correlation")
+		return
+	}
+	envelope := map[string]any{
+		"mission_id": missionID,
+		"scan_id":    scanID,
+		"issue":      json.RawMessage(issue),
+	}
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		log.Printf("Failed to marshal Burp scanner issue for brain: %v", err)
+		return
+	}
+	log.Printf("Forwarding Burp scanner issue to brain mission=%s scan=%s", missionID, scanID)
+	c.sendMsg(Message{
+		Type:       "burp_scan_issue",
+		ScanID:     missionID,
+		MissionID:  missionID,
+		Parameters: json.RawMessage(body),
+	})
+}
+
+func (c *Client) handleBurpExtensionProxyRequest(msg Message) {
+	responseType := strings.TrimSuffix(msg.Type, "_request") + "_response"
+	requestID := msg.RequestID
+	if requestID == "" {
+		requestID = msg.ID
+	}
+	if c.extension == nil {
+		c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusServiceUnavailable, map[string]any{
+			"error": "extension_server_unavailable",
+		})
+		return
+	}
+
+	switch msg.Type {
+	case "burp_pair_initiate_request":
+		resp, err := c.extension.InitiatePair()
+		if err != nil {
+			c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusInternalServerError, map[string]any{
+				"error":   "pair_initiate_failed",
+				"message": err.Error(),
+			})
+			return
+		}
+		c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusOK, resp)
+
+	case "burp_pair_status_request":
+		c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusOK, c.extension.PairStatus())
+
+	case "burp_pair_cancel_request":
+		if err := c.extension.CancelPair(); err != nil {
+			c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusInternalServerError, map[string]any{
+				"error":   "pair_cancel_failed",
+				"message": err.Error(),
+			})
+			return
+		}
+		c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusOK, map[string]any{"cancelled": true})
+
+	case "burp_pair_disconnect_request":
+		if err := c.extension.DisconnectExtension(); err != nil {
+			c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusInternalServerError, map[string]any{
+				"error":   "pair_disconnect_failed",
+				"message": err.Error(),
+			})
+			return
+		}
+		c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusOK, map[string]any{"disconnected": true})
+
+	case "burp_state_request":
+		state, err := c.extension.BurpState()
+		if errors.Is(err, burp.ErrExtensionStateNotReceived) {
+			c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusNotFound, map[string]any{
+				"error": "state_not_received",
+			})
+			return
+		}
+		if err != nil {
+			c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusInternalServerError, map[string]any{
+				"error":   "state_unavailable",
+				"message": err.Error(),
+			})
+			return
+		}
+		c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusOK, state)
+
+	case "burp_scope_active_request":
+		scope := c.extension.ActiveScope()
+		if scope == nil {
+			c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusNoContent, map[string]any{})
+			return
+		}
+		c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusOK, scope)
+
+	case "burp_scope_clear_request":
+		if err := c.extension.ClearScope(); err != nil {
+			c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusServiceUnavailable, map[string]any{
+				"error":   "scope_clear_failed",
+				"message": err.Error(),
+			})
+			return
+		}
+		c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusOK, map[string]any{"cleared": true})
+
+	case "burp_approval_gates_active_request":
+		gates := c.extension.ActiveApprovalGates()
+		if gates == nil {
+			c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusNoContent, map[string]any{})
+			return
+		}
+		c.sendBurpExtensionProxyResponse(msg, responseType, http.StatusOK, gates)
+	}
+}
+
+func (c *Client) sendBurpExtensionProxyResponse(request Message, responseType string, statusCode int, payload any) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		statusCode = http.StatusInternalServerError
+		body = []byte(`{"error":"response_marshal_failed"}`)
+	}
+	requestID := request.RequestID
+	if requestID == "" {
+		requestID = request.ID
+	}
+	c.sendMsgSync(Message{
+		Type:       responseType,
+		ID:         request.ID,
+		RequestID:  requestID,
+		StatusCode: statusCode,
+		Result:     string(body),
+	})
 }
 
 // prePullSandboxImage checks Docker availability and pre-pulls the sandbox image if missing.
